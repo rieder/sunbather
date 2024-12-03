@@ -188,8 +188,8 @@ def save_plain_parker_profile(planet, Mdot, T, spectrum, h_fraction=0.9,
         warnings.warn(f"This Parker wind profile is supersonic already at Rp: {save_name}")
 
 
-def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir, 
-                             mu_bar=None, mu_struc=None, no_tidal=False, altmax=20):
+def save_temp_parker_profile(planet, Mdot, T, zdict, pdir, 
+                             mu_bar, mu_struc=None, no_tidal=False, altmax=20):
     """
     Uses the p-winds code (dos Santos et al. 2022)
     Runs p_winds and saves a 'pprof' txt file with the r, rho, v, mu structure.
@@ -207,9 +207,6 @@ def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         log of the mass-loss rate in units of g s-1.
     T : str or numeric
         Temperature in units of K.
-    spectrum : dict
-        SED at the planet distance in the dictionary format that p-winds expects.
-        Can be made with cloudy_spec_to_pwinds().
     zdict : dict
         Dictionary with the scale factors of all elements relative
         to the default solar composition. Can be easily created with tools.get_zdict().
@@ -218,9 +215,8 @@ def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         where the isothermal parker wind density and velocity profiles are saved.
         Different folders may exist there for a given planet, to separate for example profiles
         with different assumptions such as stellar SED/semi-major axis/composition.
-    mu_bar : float, optional
+    mu_bar : float
         Weighted mean of the mean particle mass. Based on Eq. A.3 of Lampon et al. (2020).
-        If None, p-winds will calculate mu(r) and the associated mu_bar. By default None.
     mu_struc : numpy.ndarray, optional
         Mean particle mass profile, must be provided if mu_bar is None.
         Typically, this is a mu(r)-profile as given by Cloudy. By default None.
@@ -235,10 +231,6 @@ def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
     -------
     save_name : str
         Full path + filename of the saved Parker wind profile file.
-    mu_bar : float
-        Weighted mean of the mean particle mass. Based on Eq. A.3 of Lampon et al. (2020).
-        If the input mu_bar was None, this will return the value as calculated by p-winds.
-        If the input mu_bar was not None, this will return that same value.
     launch_velocity : float
         Velocity at the planet radius in units of the sonic speed. If it is larger than 1,
         the wind is "launched" already supersonic, and hence the assumption of a transonic
@@ -254,33 +246,8 @@ def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
     m_dot = 10 ** Mdot  # Total atmospheric escape rate in g / s
     r = np.logspace(0, np.log10(altmax), 1000)  # Radial distance profile in unit of planetary radii
 
-
-    if mu_bar is None: #if not given by a Cloudy run, let p-winds calculate it (used the first iteration)
-        #pretend that the metals don't exist and just calculate the h_fraction with only H and He abundances
-        abundances = tools.get_abundances(zdict) #solar abundances
-        h_fraction = abundances['H'] / (abundances['H'] + abundances['He']) #approximate it by this for now, later Cloudy will give mu
-
-        # A few assumptions about the planet's atmosphere
-        he_fraction = 1 - h_fraction  # He number fraction
-        he_h_fraction = he_fraction / h_fraction
-        mean_f_ion = 0.0  # Mean ionization fraction (will be self-consistently calculated later)
-        mu_0 = (1 + 4 * he_h_fraction) / (1 + he_h_fraction + mean_f_ion)
-        # mu_0 is the constant mean molecular weight (assumed for now, will be updated later)
-
-        initial_f_ion = 0.
-
-        f_r, mu_bar = pw_hydrogen.ion_fraction(r, R_pl, T, h_fraction,
-                                    m_dot, M_pl, mu_0,
-                                    spectrum_at_planet=spectrum, exact_phi=True,
-                                    initial_f_ion=initial_f_ion, relax_solution=True,
-                                    return_mu=True, atol=1e-8, rtol=1e-5,
-                                    convergence=0.0001, max_n_relax=30) #I personally think we can use more than 0.01 convergence
-
-        mu_array = ((1-h_fraction)*4.0 + h_fraction)/(h_fraction*(1+f_r)+(1-h_fraction)) #this assumes no Helium ionization
-
-    else: #used later iterations
-        assert np.abs(mu_struc[0,0] - 1.) < 0.03 and np.abs(mu_struc[-1,0] - altmax) < 0.0001, "Looks like Cloudy didn't simulate to 1Rp: "+str(mu_struc[0,0]) #ensure safe extrapolation
-        mu_array = interp1d(mu_struc[:,0], mu_struc[:,1], fill_value='extrapolate')(r)
+    assert np.abs(mu_struc[0,0] - 1.) < 0.03 and np.abs(mu_struc[-1,0] - altmax) < 0.0001, "Looks like Cloudy didn't simulate to 1Rp: "+str(mu_struc[0,0]) #ensure safe extrapolation
+    mu_array = interp1d(mu_struc[:,0], mu_struc[:,1], fill_value='extrapolate')(r)
 
     vs = pw_parker.sound_speed(T, mu_bar)  # Speed of sound (km/s, assumed to be constant)
     if no_tidal:
@@ -305,7 +272,7 @@ def save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
 
     launch_velocity = v_array[0] #velocity at Rp in units of sonic speed
 
-    return save_name, mu_bar, launch_velocity
+    return save_name, launch_velocity
 
 
 def run_parker_with_cloudy(filename, T, planet, zdict):
@@ -397,9 +364,9 @@ def calc_mu_bar(sim):
     return mu_bar
 
 
-def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir, 
+def save_cloudy_parker_profile(planet, Mdot, T, zdict, pdir, 
                                convergence=0.01, maxit=7, cleantemp=False, 
-                               overwrite=False, verbose=False, avoid_pwinds_mubar=False,
+                               overwrite=False, verbose=False,
                                no_tidal=False, altmax=20):
     """
     Calculates an isothermal Parker wind profile with any composition by iteratively
@@ -418,9 +385,6 @@ def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         log of the mass-loss rate in units of g s-1.
     T : str or numeric
         Temperature in units of K.
-    spectrum : dict
-        SED at the planet distance in the dictionary format that p-winds expects.
-        Can be made with cloudy_spec_to_pwinds().
     zdict : dict
         Dictionary with the scale factors of all elements relative
         to the default solar composition. Can be easily created with tools.get_zdict().
@@ -440,11 +404,6 @@ def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         Whether to overwrite existing models, by default False.
     verbose : bool, optional
         Whether to print diagnostics about the convergence of mu_bar, by default False
-    avoid_pwinds_mubar : bool, optional
-        Whether to avoid using p-winds to calculate mu_bar during the first iteration.
-        If True, we guess the mu_bar of the first iteration based on a completely neutral
-        atmosphere. This can be helpful in cases where p-winds solver cannot find a solution,
-        but Cloudy typically can. By default False.
     no_tidal : bool, optional
         Whether to neglect tidal gravity - fourth term of Eq. 4 of Linssen et al. (2024).
         See also Appendix D of Vissapragada et al. (2022) for the p-winds implementation.
@@ -459,17 +418,13 @@ def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         print("Parker profile already exists and overwrite = False:", planet.name, pdir, "%.3f" %Mdot, T)
         return #this quits the function but if we're running a grid, it doesn't quit the whole Python code
 
-    if avoid_pwinds_mubar:
-        tools.verbose_print("Making initial parker profile while assuming a completely neutral mu_bar...", verbose=verbose)
-        neutral_mu_bar = calc_neutral_mu(zdict)
-        neutral_mu_struc = np.array([[1., neutral_mu_bar], [altmax, neutral_mu_bar]]) #set up an array with constant mu(r) at the neutral value
-        filename, previous_mu_bar, launch_velocity = save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir, 
-                                                             mu_bar=neutral_mu_bar, mu_struc=neutral_mu_struc, no_tidal=no_tidal, altmax=altmax)
-        tools.verbose_print(f"Saved temp parker profile with neutral mu_bar: {previous_mu_bar}" , verbose=verbose)
-    else:
-        tools.verbose_print("Making initial parker profile with p-winds...", verbose=verbose)
-        filename, previous_mu_bar, launch_velocity = save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir, mu_bar=None, no_tidal=no_tidal, altmax=altmax)
-        tools.verbose_print(f"Saved temp parker profile with p-winds's mu_bar: {previous_mu_bar}" , verbose=verbose)
+    tools.verbose_print("Making initial parker profile while assuming a completely neutral mu_bar...", verbose=verbose)
+    neutral_mu_bar = calc_neutral_mu(zdict)
+    neutral_mu_struc = np.array([[1., neutral_mu_bar], [altmax, neutral_mu_bar]]) #set up an array with constant mu(r) at the neutral value
+    filename, launch_velocity = save_temp_parker_profile(planet, Mdot, T, zdict, pdir, 
+                                                            neutral_mu_bar, mu_struc=neutral_mu_struc, no_tidal=no_tidal, altmax=altmax)
+    tools.verbose_print(f"Saved temp parker profile with neutral mu_bar: {neutral_mu_bar}" , verbose=verbose)
+    previous_mu_bar = neutral_mu_bar
 
     for itno in range(maxit):
         tools.verbose_print(f"Iteration number: {itno+1}", verbose=verbose)
@@ -484,8 +439,8 @@ def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
         mu_bar = calc_mu_bar(sim)
         tools.verbose_print(f"Making new parker profile with p-winds based on Cloudy's reported mu_bar: {mu_bar}", verbose=verbose)
         mu_struc = np.column_stack((sim.ovr.alt.values[::-1]/planet.R, sim.ovr.mu[::-1].values)) #pass Cloudy's mu structure to save in the pprof
-        filename, mu_bar, launch_velocity = save_temp_parker_profile(planet, Mdot, T, spectrum, zdict, pdir, 
-                                                    mu_bar=mu_bar, mu_struc=mu_struc, no_tidal=no_tidal, altmax=altmax)
+        filename, launch_velocity = save_temp_parker_profile(planet, Mdot, T, zdict, pdir, 
+                                                    mu_bar, mu_struc=mu_struc, no_tidal=no_tidal, altmax=altmax)
         tools.verbose_print("Saved temp parker profile.", verbose=verbose)
 
         if np.abs(mu_bar - previous_mu_bar)/previous_mu_bar < convergence:
@@ -508,7 +463,7 @@ def save_cloudy_parker_profile(planet, Mdot, T, spectrum, zdict, pdir,
 
 
 def run_s(plname, pdir, Mdot, T, SEDname, fH, zdict, mu_conv, 
-          mu_maxit, overwrite, verbose, avoid_pwinds_mubar, no_tidal):
+          mu_maxit, overwrite, verbose, no_tidal):
     """
     Calculates a single isothermal Parker wind profile.
 
@@ -550,12 +505,6 @@ def run_s(plname, pdir, Mdot, T, SEDname, fH, zdict, mu_conv,
         Whether to overwrite existing models.
     verbose : bool
         Whether to print diagnostics about the convergence of mu_bar.
-    avoid_pwinds_mubar : bool
-        Whether to avoid using p-winds to calculate mu_bar during the first iteration,
-        when using the p-winds/Cloudy iterative method. Will only be used if fH is None.
-        If True, we guess the mu_bar of the first iteration based on a completely neutral
-        atmosphere. This can be helpful in cases where p-winds solver cannot find a solution,
-        but Cloudy typically can.
     no_tidal : bool
         Whether to neglect tidal gravity - fourth term of Eq. 4 of Linssen et al. (2024).
         See also Appendix D of Vissapragada et al. (2022) for the p-winds implementation.
@@ -565,14 +514,14 @@ def run_s(plname, pdir, Mdot, T, SEDname, fH, zdict, mu_conv,
     if SEDname != 'real':
         p.set_var(SEDname=SEDname)
     altmax = min(20, int((p.a - p.Rstar) / p.R)) #solve profile up to 20 Rp, unless the star is closer than that
-    spectrum = cloudy_spec_to_pwinds(tools.cloudypath+'/data/SED/'+p.SEDname, 1., (p.a - altmax*p.R)/tools.AU) #assumes SED is at 1 AU
 
     if fH != None: #then run p_winds standalone
+        spectrum = cloudy_spec_to_pwinds(tools.cloudypath+'/data/SED/'+p.SEDname, 1., (p.a - altmax*p.R)/tools.AU) #assumes SED is at 1 AU
         save_plain_parker_profile(p, Mdot, T, spectrum, h_fraction=fH, pdir=pdir, overwrite=overwrite, no_tidal=no_tidal, altmax=altmax)
     else: #then run p_winds/Cloudy iterative scheme
-        save_cloudy_parker_profile(p, Mdot, T, spectrum, zdict, pdir, 
+        save_cloudy_parker_profile(p, Mdot, T, zdict, pdir, 
                                    convergence=mu_conv, maxit=mu_maxit, cleantemp=True, 
-                                   overwrite=overwrite, verbose=verbose, avoid_pwinds_mubar=avoid_pwinds_mubar,
+                                   overwrite=overwrite, verbose=verbose,
                                    no_tidal=no_tidal, altmax=altmax)
 
 
@@ -589,8 +538,7 @@ def catch_errors_run_s(*args):
 
 def run_g(plname, pdir, cores, Mdot_l, Mdot_u, Mdot_s, 
           T_l, T_u, T_s, SEDname, fH, zdict, mu_conv, 
-          mu_maxit, overwrite, verbose, avoid_pwinds_mubar,
-          no_tidal):
+          mu_maxit, overwrite, verbose, no_tidal):
     """
     Calculates a grid of isothermal Parker wind models, by executing the run_s() function in parallel.
 
@@ -642,12 +590,6 @@ def run_g(plname, pdir, cores, Mdot_l, Mdot_u, Mdot_s,
         Whether to overwrite existing models.
     verbose : bool
         Whether to print diagnostics about the convergence of mu_bar.
-    avoid_pwinds_mubar : bool
-        Whether to avoid using p-winds to calculate mu_bar during the first iteration,
-        when using the p-winds/Cloudy iterative method. Will only be used if fH is None.
-        If True, we guess the mu_bar of the first iteration based on a completely neutral
-        atmosphere. This can be helpful in cases where p-winds solver cannot find a solution,
-        but Cloudy typically can.
     no_tidal : bool
         Whether to neglect tidal gravity - fourth term of Eq. 4 of Linssen et al. (2024).
         See also Appendix D of Vissapragada et al. (2022) for the p-winds implementation.
@@ -658,7 +600,7 @@ def run_g(plname, pdir, cores, Mdot_l, Mdot_u, Mdot_s,
     pars = []
     for Mdot in np.arange(float(Mdot_l), float(Mdot_u)+1e-6, float(Mdot_s)): #1e-6 so that upper bound is inclusive
         for T in np.arange(int(T_l), int(T_u)+1e-6, int(T_s)).astype(int):
-            pars.append((plname, pdir, Mdot, T, SEDname, fH, zdict, mu_conv, mu_maxit, overwrite, verbose, avoid_pwinds_mubar, no_tidal))
+            pars.append((plname, pdir, Mdot, T, SEDname, fH, zdict, mu_conv, mu_maxit, overwrite, verbose, no_tidal))
 
     p.starmap(catch_errors_run_s, pars)
     p.close()
@@ -714,9 +656,6 @@ if __name__ == '__main__':
     parser.add_argument("-mu_maxit", type=int, default=7, help="maximum number of iterations the p_winds/Cloudy iterative scheme is ran " \
                                         "if convergence is not reached [default =7]")
     parser.add_argument("-verbose", action='store_true', help="print out mu-bar values of each iteration [default=False]")
-    parser.add_argument("-avoid_pwinds_mubar", action='store_true', help="avoid using the mu-bar value predicted by p-winds for the first iteration. Instead, " \
-                                        "start with a mu_bar of a completely neutral atmosphere. Helps to avoid the p-winds 'solve_ivp' errors. You may need to " \
-                                        "use a -mu_maxit higher than 7 when toggling this on. [default=False]")
     parser.add_argument("-no_tidal", action='store_true', help="neglect the stellar tidal gravity term [default=False, i.e. tidal term included]")
     args = parser.parse_args()
 
@@ -725,8 +664,8 @@ if __name__ == '__main__':
     else: #if z==None we should not pass that to the tools.get_zdict function
         zdict = tools.get_zdict(zelem=args.zelem)
 
-    if args.fH != None and (args.zelem != {} or args.mu_conv != 0.01 or args.mu_maxit != 7 or args.avoid_pwinds_mubar):
-        warnings.warn("The -zelem, -mu_conv -mu_maxit, and -avoid_pwinds_mubar commands only combine with -z, not with -fH, so I will ignore their input.")
+    if args.fH != None and (args.zelem != {} or args.mu_conv != 0.01 or args.mu_maxit != 7):
+        warnings.warn("The -zelem, -mu_conv, and -mu_maxit commands only combine with -z, not with -fH, so I will ignore their input.")
 
     #set up the folder structure if it doesn't exist yet
     if not os.path.isdir(tools.projectpath+'/parker_profiles/'):
@@ -739,12 +678,12 @@ if __name__ == '__main__':
         os.mkdir(tools.projectpath+'/parker_profiles/'+args.plname+'/'+args.pdir+'/temp')
 
     if (len(args.T) == 1 and len(args.Mdot) == 1): #then we run a single model
-        run_s(args.plname, args.pdir, args.Mdot[0], args.T[0], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.avoid_pwinds_mubar, args.no_tidal)
+        run_s(args.plname, args.pdir, args.Mdot[0], args.T[0], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.no_tidal)
     elif (len(args.T) == 3 and len(args.Mdot) == 3): #then we run a grid over both parameters
-        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[1], args.Mdot[2], args.T[0], args.T[1], args.T[2], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.avoid_pwinds_mubar, args.no_tidal)
+        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[1], args.Mdot[2], args.T[0], args.T[1], args.T[2], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.no_tidal)
     elif (len(args.T) == 3 and len(args.Mdot) == 1): #then we run a grid over only T
-        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[0], args.Mdot[0], args.T[0], args.T[1], args.T[2], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.avoid_pwinds_mubar, args.no_tidal)
+        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[0], args.Mdot[0], args.T[0], args.T[1], args.T[2], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.no_tidal)
     elif (len(args.T) == 1 and len(args.Mdot) == 3): #then we run a grid over only Mdot
-        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[1], args.Mdot[2], args.T[0], args.T[0], args.T[0], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.avoid_pwinds_mubar, args.no_tidal)
+        run_g(args.plname, args.pdir, args.cores, args.Mdot[0], args.Mdot[1], args.Mdot[2], args.T[0], args.T[0], args.T[0], args.SEDname, args.fH, zdict, args.mu_conv, args.mu_maxit, args.overwrite, args.verbose, args.no_tidal)
 
     print("\nCalculations took", int(time.time()-t0) // 3600, "hours, ", (int(time.time()-t0)%3600) // 60, "minutes and ", (int(time.time()-t0)%60), "seconds.\n")
